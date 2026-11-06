@@ -1,6 +1,6 @@
 # Softbody Toys
 
-A little box of desktop toys: black and white, hard edges, and no toolkit underneath. This is made using Claude Code, and do not expect it to be maintained frquently.
+A little box of desktop toys: black and white, hard edges, and no toolkit underneath. This is made using Claude Code, and do not expect it to be maintained frequently.
 
     make
     ./softbodies
