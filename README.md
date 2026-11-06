@@ -1,6 +1,6 @@
 # Soft Toys
 
-A little box of desktop toys: black and white, hard edges, and no toolkit underneath.
+A little box of desktop toys: black and white, hard edges, and no toolkit underneath. This is made using Claude Code, and do not expect it to be maintained.
 
     make
     ./softbodies
@@ -18,9 +18,9 @@ only libc and libm. `make test` also needs Python 3.
 
 ## Other platforms
 
-| Platform    | Build          | Output                 | Needs                                   |
-|-------------|----------------|------------------------|-----------------------------------------|
-| Windows     | `make windows` | `dist/softbodies.exe`  | MinGW-w64                               |
+| Platform    | Build          | Output                 | Needs                                              |
+|-------------|----------------|------------------------|----------------------------------------------------|
+| Windows     | `make windows` | `dist/softbodies.exe`  | MinGW-w64                                          |
 | WebAssembly | `make web`     | `dist/softbodies.html` | Zig, or another `wasm32-wasi` C compiler; Python 3 |
 
 The Windows build is a single 32-bit `.exe` with no DLLs to ship, and defaults to
