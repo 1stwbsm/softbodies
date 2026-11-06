@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SoftDesk</title>
+<style>
+  /* Strictly black and white, and no rounded corners anywhere. */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; image-rendering: pixelated; }
+  #desk { position: absolute; inset: 0; image-rendering: pixelated; }
+  [hidden] { display: none !important; }
+
+  #bar { position: absolute; left: 0; right: 0; top: 0; height: 24px; background: #000; border-bottom: 2px solid #fff;
+         display: flex; align-items: stretch; z-index: 100000; }
+  .menu-title { display: flex; align-items: center; padding: 0 10px; }
+  .menu-title:hover, .menu-title.open { background: #fff; }
+  .menu-title:hover canvas, .menu-title.open canvas { filter: invert(1); }
+  #clock { margin-left: auto; display: flex; align-items: center; padding: 0 10px; }
+  .menu { position: absolute; top: 26px; background: #000; border: 2px solid #fff; z-index: 100001; min-width: 190px; }
+  .item { display: flex; align-items: center; height: 22px; padding: 0 10px; }
+  .item:hover { background: #fff; }
+  .item:hover canvas { filter: invert(1); }
+  .sep { height: 2px; margin: 3px 0; background: #fff; }
+
+  #tray { position: absolute; left: 0; right: 0; bottom: 0; height: 28px; background: #000; border-top: 2px solid #fff;
+          display: flex; align-items: center; gap: 4px; padding: 0 4px; z-index: 100000; }
+  .tab { display: flex; align-items: center; height: 20px; padding: 0 8px; border: 2px solid #fff; }
+  .tab:hover { background: #fff; }
+  .tab:hover canvas { filter: invert(1); }
+
+  .icon { position: absolute; width: 96px; display: flex; flex-direction: column; align-items: center; gap: 4px; touch-action: none; }
+  .icon .name { background: #000; padding: 2px 3px; }
+  .icon.selected .name { background: #fff; }
+  .icon.selected canvas { filter: invert(1); }
+
+  .win { position: absolute; box-shadow: 6px 6px 0 #000; background: #000; }
+  .win.fake { border: 2px solid #fff; }
+  .title { display: flex; align-items: center; height: 22px; background: #fff; padding: 0 3px 0 6px; gap: 6px; touch-action: none; }
+  .title > canvas { filter: invert(1); }
+  .stripes { flex: 1; height: 12px; background: repeating-linear-gradient(#000 0 2px, #fff 2px 5px); }
+  .win:not(.active) .stripes { visibility: hidden; }
+  .chrome { width: 16px; height: 16px; border: 2px solid #000; background: #fff; box-sizing: border-box; position: relative; }
+  .chrome:hover { background: #000; }
+  .chrome canvas { position: absolute; left: 1px; top: 1px; filter: invert(1); }
+  .chrome:hover canvas { filter: none; }
+  .body { padding: 8px; }
+  .body .line { height: 18px; }
+  .btn { display: inline-flex; align-items: center; height: 22px; padding: 0 10px; border: 2px solid #fff; }
+  .btn:hover { background: #fff; }
+  .btn:hover canvas { filter: invert(1); }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .swatch { width: 74px; height: 56px; border: 2px solid #fff; image-rendering: pixelated; }
+  .swatch.on { outline: 4px solid #fff; outline-offset: -8px; }
+
+  .app canvas { position: absolute; left: 0; top: 0; cursor: none; touch-action: none; outline: none; }
+
+  #screen { position: absolute; inset: 0; background: #000; z-index: 200000; padding: 32px; }
+  #screen .line { height: 22px; }
+  #screen.center { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+</style>
+</head>
+<body>
+<div id="desk"></div>
+<div id="bar"></div>
+<div id="tray"></div>
+<div id="screen" hidden></div>
+<noscript><p style="color:#fff;font-family:monospace">SoftDesk needs JavaScript and WebAssembly.</p></noscript>
+<script>
+"use strict";
+// Filled in by tools/bundle_web.py: the program, base64 encoded.
+const WASM_BASE64 = "@@WASM_BASE64@@";
+
+const $ = (id) => document.getElementById(id);
+const desk = $("desk"), bar = $("bar"), tray = $("tray"), screenEl = $("screen");
+const BAR_H = 26, TRAY_H = 30, MIN_W = 480, MIN_H = 360, MAX_APPS = 4, DOT = 2;
+
+// These numbers must match SwEventType in softwin.h.
+const EV = { RESIZE: 1, MOTION: 2, DOWN: 3, UP: 4, WHEEL: 5, KEY_DOWN: 6, KEY_UP: 7, LEAVE: 8 };
+const EDGE = { TOP: 1, BOTTOM: 2, LEFT: 4, RIGHT: 8 };
+
+// KeyboardEvent.code is a physical position, which is what SoftWin's codes are too.
+const KEYS = { Escape: 1, Minus: 12, Equal: 13, Backspace: 14, Tab: 15, BracketLeft: 26, BracketRight: 27,
+  Enter: 28, ControlLeft: 29, Semicolon: 39, Quote: 40, ShiftLeft: 42, Comma: 51, Period: 52, Slash: 53,
+  ShiftRight: 54, Space: 57, F1: 59, F2: 60, ControlRight: 97, Backquote: 41, Backslash: 43, NumpadEnter: 96,
+  Home: 102, ArrowUp: 103, ArrowLeft: 105, ArrowRight: 106, End: 107, ArrowDown: 108, Delete: 111,
+  Digit1: 2, Digit2: 3, Digit3: 4, Digit4: 5, Digit5: 6, Digit6: 7, Digit7: 8, Digit8: 9, Digit9: 10, Digit0: 11,
+  KeyQ: 16, KeyW: 17, KeyE: 18, KeyR: 19, KeyT: 20, KeyY: 21, KeyU: 22, KeyI: 23, KeyO: 24, KeyP: 25,
+  KeyA: 30, KeyS: 31, KeyD: 32, KeyF: 33, KeyG: 34, KeyH: 35, KeyJ: 36, KeyK: 37, KeyL: 38,
+  KeyZ: 44, KeyX: 45, KeyC: 46, KeyV: 47, KeyB: 48, KeyN: 49, KeyM: 50 };
+
+// Must match ToyMode in app.h.
+const TOY = { SELECTOR: 0, SOFTPHYS: 1, SOFTBODIES: 2 };
+const SCENES = {
+  SOFTPHYS: ["SANDBOX", "HOURGLASS", "VOLCANO", "FOREST", "DAM", "REFINERY", "GLACIER", "FUSE"],
+  SOFTBODIES: ["HELLO", "TOWER", "LAUNDRY", "TRAMPOLINE", "PEGBOARD", "HOPPERS", "GOO MILL", "BALLOONS", "AQUARIUM", "WASHER"],
+};
+
+let module = null, FONT = null, windows = [], active = null, zTop = 10, crashes = 0;
+
+/* ---- text and pictures ---- */
+
+// Draws text in SoftWin's font: white ink on transparent, flipped with filter: invert.
+function text(str, dot = DOT) {
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, str.length * 6 - 1) * dot;
+  c.height = 7 * dot;
+  c.style.width = c.width + "px";
+  c.style.height = c.height + "px";
+  const g = c.getContext("2d");
+  g.fillStyle = "#fff";
+  [...str.toUpperCase()].forEach((ch, i) => {
+    const rows = FONT[ch.charCodeAt(0)];
+    if (!rows) return;
+    rows.forEach((row, y) => {
+      for (let x = 0; x < 5; x++) if (row & (0x10 >> x)) g.fillRect((i * 6 + x) * dot, y * dot, dot, dot);
+    });
+  });
+  return c;
+}
+
+// '#' is white, '.' is black, and a space lets the wallpaper through.
+function picture(rows, scale = 3) {
+  const c = document.createElement("canvas");
+  c.width = Math.max(...rows.map((r) => r.length)) * scale;
+  c.height = rows.length * scale;
+  c.style.width = c.width + "px";
+  c.style.height = c.height + "px";
+  const g = c.getContext("2d");
+  rows.forEach((row, y) => [...row].forEach((ch, x) => {
+    if (ch === " ") return;
+    g.fillStyle = ch === "#" ? "#fff" : "#000";
+    g.fillRect(x * scale, y * scale, scale, scale);
+  }));
+  return c;
+}
+
+const ART = {
+  sand: ["       ##       ", "       ##       ", "      #..#      ", "      #..#      ", "     #.#..#     ", "    #..#.#.#    ",
+         "   #.#..#.#.#   ", "   #..#.#.#.#   ", "  #.#.#.#.#.#.# ", "  #.#..#.#..#.# ", " ############## "],
+  blob: ["     ######     ", "   ##......##   ", "  #..........#  ", " #...##..##...# ", " #...##..##...# ", "#..............#",
+         "#..............#", "#..#........#..#", "#...########...#", " #............# ", "  ##........##  ", "    ########    "],
+  doc: ["  ##########    ", "  #........##   ", "  #.######.#.#  ", "  #........#### ", "  #.########.# ", "  #..........# ",
+        "  #.########.# ", "  #..........# ", "  #.######...# ", "  #..........# ", "  #.########.# ", "  ############ "],
+  keys: [" ############## ", " #............# ", " #.##.##.##.##.#", " #............# ", " #.##.##.##.##.#", " #............# ",
+         " #.##.##.##.##.#", " #............# ", " #..########..# ", " #............# ", " ############## "],
+  folder: ["  #####         ", " #.....#        ", " #......####### ", " #............# ", " #............# ", " #............# ",
+           " #............# ", " #............# ", " #............# ", " ############## "],
+  trash: ["     ######     ", "  ############  ", "                ", "   #.#.#..#.#   ", "   #.#.#..#.#   ",
+          "   #.#.#..#.#   ", "   #.#.#..#.#   ", "   #.#.#..#.#   ", "   #.#.#..#.#   ", "   ##########   "],
+  full: ["    # ### #     ", "  ############  ", "   ##########   ", "   #.#.#..#.#   ", "   #.#.#..#.#   ",
+         "   #.#.#..#.#   ", "   #.#.#..#.#   ", "   #.#.#..#.#   ", "   #.#.#..#.#   ", "   ##########   "],
+  clock: ["     ######     ", "   ##......##   ", "  #....#.....#  ", " #.....#......# ", "#......#.......#",
+          "#......####....#", "#..............#", " #............# ", "  #..........#  ", "   ##......##   ", "     ######     "],
+  paint: ["  ############  ", "  #.#.#.#.#.##  ", "  ##.#.#.#.#.#  ", "  #.#.#.#.#.##  ", "  ############  ",
+          "       ##       ", "       ##       ", "      ####      ", "      ####      "],
+};
+
+/* ---- wallpaper ---- */
+
+const WALLPAPERS = {
+  CHECKS: (g) => { g.fillRect(0, 0, 2, 2); g.fillRect(2, 2, 2, 2); return 4; },
+  DITHER: (g) => { g.fillRect(0, 0, 2, 2); g.fillRect(4, 4, 2, 2); return 8; },
+  STRIPES: (g) => { for (let i = 0; i < 12; i += 2) g.fillRect(i, 10 - i, 2, 2); return 12; },
+  BLOBS: (g) => {
+    ["  ####  ", " #....# ", "#.#..#.#", "#......#", "#.####.#", " #....# ", "  ####  "].forEach((r, y) =>
+      [...r].forEach((ch, x) => { if (ch === "#") g.fillRect(8 + x * 2, 8 + y * 2, 2, 2); }));
+    return 40;
+  },
+  NIGHT: () => 8,
+};
+let wallpaper = "DITHER";
+
+function wallpaperUrl(name) {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d");
+  g.fillStyle = "#000";
+  g.fillRect(0, 0, 64, 64);
+  g.fillStyle = "#fff";
+  const size = WALLPAPERS[name](g);
+  const t = document.createElement("canvas");
+  t.width = t.height = size;
+  t.getContext("2d").drawImage(c, 0, 0);
+  return t.toDataURL();
+}
+
+function setWallpaper(name) {
+  wallpaper = name;
+  desk.style.backgroundImage = `url(${wallpaperUrl(name)})`;
+  document.querySelectorAll(".swatch").forEach((s) => s.classList.toggle("on", s.dataset.name === name));
+}
+
+/* ---- windows ---- */
+
+function place(win) {
+  // The title bar always stays reachable.
+  win.x = Math.min(window.innerWidth - 60, Math.max(60 - win.w, win.x));
+  win.y = Math.min(window.innerHeight - TRAY_H - 22, Math.max(BAR_H, win.y));
+  win.el.style.left = win.x + "px";
+  win.el.style.top = win.y + "px";
+}
+
+function focusWin(win) {
+  if (active && active !== win) active.el.classList.remove("active");
+  active = win;
+  if (win) { win.el.style.zIndex = ++zTop; win.el.classList.add("active"); }
+}
+
+function focusTop() {
+  const open = windows.filter((w) => !w.minimized);
+  open.sort((a, b) => Number(b.el.style.zIndex) - Number(a.el.style.zIndex));
+  focusWin(open[0] || null);
+}
+
+function minimizeWin(win) {
+  win.minimized = true;
+  win.el.hidden = true;
+  if (win.overlay) win.overlay.hidden = true;
+  const tab = document.createElement("div");
+  tab.className = "tab";
+  tab.append(text(win.title));
+  tab.addEventListener("click", () => {
+    tab.remove();
+    win.minimized = false;
+    win.tab = null;
+    win.el.hidden = false;
+    focusWin(win);
+  });
+  win.tab = tab;
+  tray.append(tab);
+  focusTop();
+}
+
+function closeWin(win) {
+  windows = windows.filter((w) => w !== win);
+  win.el.remove();
+  if (win.tab) win.tab.remove();
+  if (win.onClose) win.onClose();
+  if (active === win) { active = null; focusTop(); }
+}
+
+let cascade = 0;
+function nextSpot() {
+  cascade = (cascade + 1) % 6;
+  return { x: 130 + cascade * 26, y: BAR_H + 14 + cascade * 26 };
+}
+
+function chromeButton(kind) {
+  const b = document.createElement("div");
+  b.className = "chrome";
+  const c = document.createElement("canvas");
+  c.width = c.height = 10;
+  c.style.width = c.style.height = "10px";
+  const g = c.getContext("2d");
+  g.fillStyle = "#fff";
+  if (kind === "min") g.fillRect(1, 7, 8, 2);
+  else for (let i = 0; i < 8; i++) { g.fillRect(1 + i, 1 + i, 2, 2); g.fillRect(8 - i, 1 + i, 2, 2); }
+  b.append(c);
+  return b;
+}
+
+// A desktop window: same chrome as SoftWin draws, built from the page.
+function openWin(key, title, width, fill) {
+  const open = windows.find((w) => w.key === key);
+  if (open) {
+    if (open.tab) open.tab.click();
+    focusWin(open);
+    return open;
+  }
+  const el = document.createElement("div");
+  el.className = "win fake";
+  el.style.width = width + "px";
+  const titleBar = document.createElement("div");
+  titleBar.className = "title";
+  const stripes = document.createElement("div");
+  stripes.className = "stripes";
+  const minB = chromeButton("min"), closeB = chromeButton("close");
+  titleBar.append(text(title), stripes, minB, closeB);
+  const body = document.createElement("div");
+  body.className = "body";
+  el.append(titleBar, body);
+  desk.append(el);
+
+  const win = { key, kind: "desk", title, el, body, w: width, minimized: false, ...nextSpot() };
+  windows.push(win);
+  fill(body, win);
+  place(win);
+  focusWin(win);
+
+  el.addEventListener("pointerdown", () => focusWin(win));
+  minB.addEventListener("click", () => minimizeWin(win));
+  closeB.addEventListener("click", () => closeWin(win));
+  titleBar.addEventListener("pointerdown", (e) => {
+    if (e.target.closest(".chrome")) return;
+    titleBar.setPointerCapture(e.pointerId);
+    const sx = e.clientX, sy = e.clientY, x0 = win.x, y0 = win.y;
+    const move = (m) => { win.x = x0 + m.clientX - sx; win.y = y0 + m.clientY - sy; place(win); };
+    const up = () => { titleBar.removeEventListener("pointermove", move); titleBar.removeEventListener("pointerup", up); };
+    titleBar.addEventListener("pointermove", move);
+    titleBar.addEventListener("pointerup", up);
+  });
+  return win;
+}
+
+function lines(parent, rows) {
+  rows.forEach((r) => {
+    const d = document.createElement("div");
+    d.className = "line";
+    if (r) d.append(text(r));
+    parent.append(d);
+  });
+}
+
+function button(label, onClick) {
+  const b = document.createElement("div");
+  b.className = "btn";
+  b.append(text(label));
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+let dialogs = 0;
+function dialog(title, rows) {
+  openWin("dialog" + ++dialogs, title, 400, (body, win) => {
+    lines(body, rows);
+    const row = document.createElement("div");
+    row.className = "btns";
+    row.append(button("OK", () => closeWin(win)));
+    body.append(row);
+  });
+}
+
+/* ---- softbodies: each window runs its own copy of the program ---- */
+
+function wasiStubs(app) {
+  const EBADF = 8;
+  const known = {
+    // Startup looks for preloaded folders until told "bad descriptor".
+    fd_prestat_get: () => EBADF,
+    random_get: (ptr, len) => {
+      crypto.getRandomValues(new Uint8Array(app.wasm.memory.buffer, ptr, Math.min(len, 65536)));
+      return 0;
+    },
+    fd_write: (fd, iovs, count, written) => {
+      const view = new DataView(app.wasm.memory.buffer);
+      let out = "", total = 0;
+      for (let i = 0; i < count; i++) {
+        const ptr = view.getUint32(iovs + i * 8, true), len = view.getUint32(iovs + i * 8 + 4, true);
+        out += new TextDecoder().decode(new Uint8Array(app.wasm.memory.buffer, ptr, len));
+        total += len;
+      }
+      view.setUint32(written, total, true);
+      (fd === 2 ? console.error : console.log)(out);
+      return 0;
+    },
+    proc_exit: (code) => { throw new Error("program exited with code " + code); },
+  };
+  return new Proxy(known, { get: (t, name) => t[name] || (() => EBADF) });
+}
+
+function dpr() { return window.devicePixelRatio || 1; }
+
+function appSize(app) {
+  const s = dpr();
+  app.el.style.width = app.canvas.style.width = app.w + "px";
+  app.el.style.height = app.canvas.style.height = app.h + "px";
+  app.wasm.sb_resize(Math.round(app.w * s), Math.round(app.h * s), s);
+}
+
+async function launch(toy = TOY.SELECTOR, scene = 0) {
+  if (windows.filter((w) => w.kind === "softbodies").length >= MAX_APPS) {
+    dialog("OUT OF JELLY", [`${MAX_APPS} WORLDS ARE ALREADY RUNNING.`, "CLOSE ONE TO MAKE ROOM."]);
+    return null;
+  }
+  const el = document.createElement("div");
+  el.className = "win app";
+  const canvas = document.createElement("canvas");
+  canvas.tabIndex = 0;
+  el.append(canvas);
+  const spot = nextSpot();
+  const app = { kind: "softbodies", title: "SOFT TOYS", el, canvas, ctx: canvas.getContext("2d", { alpha: false }),
+    wasm: null, image: null, imageKey: "", drag: null, minimized: false, ...spot,
+    w: Math.max(MIN_W, Math.min(1040, window.innerWidth - spot.x - 24)),
+    h: Math.max(MIN_H, Math.min(720, window.innerHeight - TRAY_H - spot.y - 24)),
+    lastX: 0, lastY: 0 };
+
+  const env = {
+    js_now: () => performance.now() / 1000,
+    js_present(ptr, w, h) {
+      // Memory growth replaces the buffer, so the view is rebuilt whenever it changes.
+      const buffer = app.wasm.memory.buffer, key = ptr + ":" + w + ":" + h;
+      if (!app.image || app.image.data.buffer !== buffer || key !== app.imageKey) {
+        app.image = new ImageData(new Uint8ClampedArray(buffer, ptr, w * h * 4), w, h);
+        app.imageKey = key;
+      }
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+      app.ctx.putImageData(app.image, 0, 0);
+    },
+    js_begin_move: () => { app.drag = { kind: "move", sx: app.lastX, sy: app.lastY, x0: app.x, y0: app.y }; },
+    js_begin_resize: (edges) => {
+      app.drag = { kind: "resize", edges, sx: app.lastX, sy: app.lastY, x0: app.x, y0: app.y, w0: app.w, h0: app.h };
+    },
+    js_minimize: () => minimizeWin(app),
+    // What has left the window: a click-through canvas over the whole desktop.
+    js_outer_present(ptr, w, h, x, y, rw, rh) {
+      if (!rw) { if (app.overlay) app.overlay.hidden = true; return; }
+      if (!app.overlay) {
+        app.overlay = document.createElement("canvas");
+        app.overlay.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;z-index:99999";
+        document.body.append(app.overlay);
+        app.overlayCtx = app.overlay.getContext("2d");
+      }
+      app.overlay.hidden = false;
+      if (app.overlay.width !== w || app.overlay.height !== h) {
+        app.overlay.width = w;
+        app.overlay.height = h;
+        app.overlay.style.width = w / dpr() + "px";
+        app.overlay.style.height = h / dpr() + "px";
+      }
+      const image = new ImageData(new Uint8ClampedArray(app.wasm.memory.buffer, ptr, w * h * 4), w, h);
+      app.overlayCtx.putImageData(image, 0, 0, x, y, rw, rh);
+    },
+    js_screenshot(namePtr) {
+      const bytes = new Uint8Array(app.wasm.memory.buffer, namePtr);
+      const name = new TextDecoder().decode(bytes.subarray(0, bytes.indexOf(0)));
+      canvas.toBlob((blob) => {
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = name;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      });
+    },
+  };
+  const instance = await WebAssembly.instantiate(module, { env, wasi_snapshot_preview1: wasiStubs(app) });
+  app.wasm = instance.exports;
+  app.wasm._initialize();
+  if (!app.wasm.sb_init(app.w, app.h, dpr(), toy, scene)) {
+    dialog("SOFTBODIES", ["IT WOULD NOT START."]);
+    return null;
+  }
+  el.style.width = canvas.style.width = app.w + "px";
+  el.style.height = canvas.style.height = app.h + "px";
+  desk.append(el);
+  windows.push(app);
+  place(app);
+  focusWin(app);
+  wireApp(app);
+  app.onClose = () => { if (app.overlay) app.overlay.remove(); };
+  return app;
+}
+
+function pointerPos(app, e) {
+  const r = app.canvas.getBoundingClientRect(), s = dpr();
+  return [Math.floor((e.clientX - r.left) * s), Math.floor((e.clientY - r.top) * s)];
+}
+
+function wireApp(app) {
+  const { canvas, wasm } = app;
+  const buttonOf = (e) => (e.button === 0 ? 0 : e.button === 2 ? 1 : e.button === 1 ? 2 : -1);
+
+  canvas.addEventListener("pointerdown", (e) => {
+    focusWin(app);
+    canvas.focus();
+    canvas.setPointerCapture(e.pointerId);
+    app.drag = null;
+    app.lastX = e.clientX;
+    app.lastY = e.clientY;
+    const [x, y] = pointerPos(app, e), b = buttonOf(e);
+    wasm.sw_web_event(EV.MOTION, x, y, 0);
+    if (b >= 0) wasm.sw_web_event(EV.DOWN, x, y, b);
+    e.preventDefault();
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    app.lastX = e.clientX;
+    app.lastY = e.clientY;
+    const d = app.drag;
+    if (!d) {
+      const [x, y] = pointerPos(app, e);
+      wasm.sw_web_event(EV.MOTION, x, y, 0);
+      return;
+    }
+    const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
+    if (d.kind === "move") {
+      app.x = d.x0 + dx;
+      app.y = d.y0 + dy;
+      place(app);
+      return;
+    }
+    if (d.edges & EDGE.RIGHT) app.w = Math.max(MIN_W, d.w0 + dx);
+    if (d.edges & EDGE.BOTTOM) app.h = Math.max(MIN_H, d.h0 + dy);
+    if (d.edges & EDGE.LEFT) { app.w = Math.max(MIN_W, d.w0 - dx); app.x = d.x0 + d.w0 - app.w; }
+    if (d.edges & EDGE.TOP) { app.h = Math.max(MIN_H, d.h0 - dy); app.y = d.y0 + d.h0 - app.h; }
+    place(app);
+    appSize(app);
+  });
+
+  canvas.addEventListener("pointerup", (e) => {
+    // The toy forgets a button once a window drag starts, so this release is ours.
+    if (app.drag) { app.drag = null; return; }
+    const [x, y] = pointerPos(app, e), b = buttonOf(e);
+    if (b >= 0) wasm.sw_web_event(EV.UP, x, y, b);
+  });
+
+  canvas.addEventListener("pointerleave", () => { if (!app.drag) wasm.sw_web_event(EV.LEAVE, 0, 0, 0); });
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  canvas.addEventListener("wheel", (e) => {
+    wasm.sw_web_event(EV.WHEEL, 0, 0, Math.sign(e.deltaY));
+    e.preventDefault();
+  }, { passive: false });
+}
+
+function onKey(e, type) {
+  if (!active || active.kind !== "softbodies") return;
+  const code = KEYS[e.code];
+  if (!code || e.metaKey || e.altKey) return;       // leave the browser's own shortcuts alone
+  if (e.ctrlKey && code !== KEYS.ControlLeft && code !== KEYS.ControlRight) return;
+  if (!e.repeat) active.wasm.sw_web_event(type, 0, 0, code);
+  e.preventDefault();                               // Tab, Space, F1 and quote all mean something else
+}
+window.addEventListener("keydown", (e) => onKey(e, EV.KEY_DOWN));
+window.addEventListener("keyup", (e) => onKey(e, EV.KEY_UP));
+
+// Tells a world where it is on the desktop, and what else is out there.
+function tellWorld(app) {
+  const s = dpr(), px = (v) => Math.round(v * s);
+  app.wasm.sb_position(px(app.x), px(app.y));
+  app.wasm.sb_desk(0, px(BAR_H), px(window.innerWidth), px(window.innerHeight - TRAY_H), px(window.innerWidth), px(window.innerHeight));
+  let n = 0;
+  for (const other of windows) {
+    if (other === app || other.minimized || n >= 16) continue;
+    const h = other.kind === "softbodies" ? other.h : other.el.offsetHeight;
+    const w = other.kind === "softbodies" ? other.w : other.el.offsetWidth;
+    app.wasm.sb_obstacle(n++, px(other.x), px(other.y), px(w), px(h));
+  }
+  app.wasm.sb_obstacles(n);
+}
+
+function tick() {
+  for (const win of windows) {
+    if (win.kind !== "softbodies" || win.minimized) continue;   // hidden worlds wait
+    try {
+      tellWorld(win);
+      if (!win.wasm.sb_frame()) closeWin(win);
+    } catch (err) {
+      console.error(err);
+      crashes++;
+      closeWin(win);
+      dialog("SOFTBODIES", ["THAT WORLD HAS SQUISHED.", "THE OTHERS ARE FINE."]);
+    }
+  }
+  requestAnimationFrame(tick);
+}
+
+/* ---- desktop programs ---- */
+
+function openReadMe() {
+  openWin("readme", "READ ME", 540, (body) => lines(body, [
+    "WELCOME TO SOFTDESK.",
+    "",
+    "A SMALL DESK FOR SOFT THINGS TO LIVE ON.",
+    "THIS WHOLE COMPUTER IS ONE HTML FILE.",
+    "",
+    "TOYS PICKS A TOY. THE TOY MENU SWITCHES.",
+    "EACH WINDOW IS ITS OWN UNIVERSE.",
+    "MINIMIZED WORLDS PAUSE UNTIL YOU RETURN.",
+    "",
+    "PRESS ` IN A WORLD FOR ITS TERMINAL.",
+    "SOFTPHYS: MIX THINGS. SOFTBODIES: SQUISH.",
+  ]));
+}
+
+function openKeys() {
+  openWin("keys", "KEYS", 470, (body) => lines(body, [
+    "EVERY TOY",
+    "`      TERMINAL   F1 ITS OWN KEY LIST",
+    "SPACE  PAUSE      N  STEP",
+    "R      RESET      C  CLEAR",
+    "P      SAVE PNG   V  VIEW",
+    "TAB    HIDE PANELS",
+    "",
+    "SOFTPHYS",
+    "D DRAW  E ERASE  L LINE  F FILL  H HEAT",
+    "O COOL  U PUSH   B BLAST G GRAB  K NUKE",
+    "",
+    "SOFTBODIES",
+    "G GRAB  X CUT    B BLOW  M BOMB  I PIN",
+    "W WALL  E ERASE  T TYPE  K NUKE",
+    "A MAGNET  Z FREEZE  J GLUE",
+  ]));
+}
+
+function openScenes() {
+  openWin("scenes", "SCENES", 300, (body) => {
+    lines(body, ["OPENS IN A NEW WINDOW:"]);
+    for (const toy of ["SOFTPHYS", "SOFTBODIES"]) {
+      lines(body, ["", toy]);
+      SCENES[toy].forEach((name, i) => {
+        const item = document.createElement("div");
+        item.className = "item";
+        item.dataset.scene = toy + i;
+        item.append(text(name));
+        item.addEventListener("click", () => launch(TOY[toy], i));
+        body.append(item);
+      });
+    }
+  });
+}
+
+function openWallpaper() {
+  openWin("wallpaper", "WALLPAPER", 420, (body) => {
+    const row = document.createElement("div");
+    row.className = "btns";
+    Object.keys(WALLPAPERS).forEach((name) => {
+      const s = document.createElement("div");
+      s.className = "swatch" + (name === wallpaper ? " on" : "");
+      s.dataset.name = name;
+      s.style.backgroundImage = `url(${wallpaperUrl(name)})`;
+      s.addEventListener("click", () => setWallpaper(name));
+      row.append(s);
+    });
+    body.append(row);
+  });
+}
+
+function openClock() {
+  const size = 132;
+  openWin("clock", "CLOCK", size + 20, (body, win) => {
+    const c = document.createElement("canvas");
+    c.width = c.height = size;
+    c.style.width = c.style.height = size + "px";
+    body.append(c);
+    const g = c.getContext("2d");
+    const dot = (x, y, s = 2) => g.fillRect(Math.round(x), Math.round(y), s, s);
+    const hand = (angle, len, s) => {
+      for (let i = 0; i <= Math.ceil(len); i++) dot(size / 2 + Math.sin(angle) * i, size / 2 - Math.cos(angle) * i, s);
+    };
+    const draw = () => {
+      const now = new Date();
+      g.fillStyle = "#000";
+      g.fillRect(0, 0, size, size);
+      g.fillStyle = "#fff";
+      for (let i = 0; i < 12; i++) {
+        const a = (i / 12) * Math.PI * 2, r = size / 2 - 6;
+        dot(size / 2 + Math.sin(a) * r - 1, size / 2 - Math.cos(a) * r - 1, i % 3 ? 2 : 4);
+      }
+      const sec = now.getSeconds(), min = now.getMinutes() + sec / 60, hr = (now.getHours() % 12) + min / 60;
+      hand((hr / 12) * Math.PI * 2, size * 0.24, 4);
+      hand((min / 60) * Math.PI * 2, size * 0.36, 2);
+      hand((sec / 60) * Math.PI * 2, size * 0.42, 1);
+    };
+    draw();
+    const timer = setInterval(draw, 1000);
+    win.onClose = () => clearInterval(timer);
+  });
+}
+
+/* ---- icons and trash ---- */
+
+const ICONS = [
+  { id: "toys", label: "TOYS", art: "keys", open: () => launch(TOY.SELECTOR), keep: true },
+  { id: "softphys", label: "SOFTPHYS", art: "sand", open: () => launch(TOY.SOFTPHYS), keep: true },
+  { id: "softbodies", label: "SOFTBODIES", art: "blob", open: () => launch(TOY.SOFTBODIES), keep: true },
+  { id: "readme", label: "READ ME", art: "doc", open: openReadMe },
+  { id: "keys", label: "KEYS", art: "doc", open: openKeys },
+  { id: "scenes", label: "SCENES", art: "folder", open: openScenes },
+  { id: "clock", label: "CLOCK", art: "clock", open: openClock },
+  { id: "wallpaper", label: "WALLPAPER", art: "paint", open: openWallpaper },
+  { id: "trash", label: "TRASH", art: "trash", open: openTrash, keep: true },
+];
+let trashed = [];
+const trashIcon = () => ICONS.find((i) => i.id === "trash");
+
+function renderTrashIcon() {
+  trashIcon().el.querySelector("canvas").replaceWith(picture(ART[trashed.length ? "full" : "trash"]));
+}
+
+function openTrash() {
+  const existing = windows.find((w) => w.key === "trash");
+  if (existing) closeWin(existing);
+  openWin("trash", "TRASH", 300, (body, win) => {
+    lines(body, trashed.length ? trashed.map((i) => i.label) : ["NOTHING IN HERE."]);
+    if (!trashed.length) return;
+    const row = document.createElement("div");
+    row.className = "btns";
+    const finish = () => { trashed = []; tidyIcons(); renderTrashIcon(); closeWin(win); openTrash(); };
+    row.append(button("PUT BACK", () => { trashed.forEach((i) => { i.el.hidden = false; }); finish(); }));
+    row.append(button("EMPTY", () => { trashed.forEach((i) => { i.el.remove(); i.gone = true; }); finish(); }));
+    body.append(row);
+  });
+}
+
+function tidyIcons() {
+  let y = BAR_H + 12;
+  ICONS.filter((i) => !i.gone && i.id !== "trash" && !trashed.includes(i)).forEach((i) => {
+    i.x = 14; i.y = y; y += 72;
+    i.el.style.left = i.x + "px";
+    i.el.style.top = i.y + "px";
+  });
+  const t = trashIcon();
+  t.x = window.innerWidth - 110;
+  t.y = window.innerHeight - TRAY_H - 80;
+  t.el.style.left = t.x + "px";
+  t.el.style.top = t.y + "px";
+}
+
+function selectIcon(icon) {
+  ICONS.forEach((i) => i.el && i.el.classList.toggle("selected", i === icon));
+}
+
+function overTrash(cx, cy) {
+  const r = trashIcon().el.getBoundingClientRect();
+  return cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
+}
+
+function buildIcons() {
+  ICONS.forEach((icon) => {
+    const el = document.createElement("div");
+    el.className = "icon";
+    el.dataset.id = icon.id;
+    const name = document.createElement("div");
+    name.className = "name";
+    name.append(text(icon.label));
+    el.append(picture(ART[icon.art]), name);
+    desk.append(el);
+    icon.el = el;
+
+    let press = null, lastClick = 0;
+    el.addEventListener("pointerdown", (e) => {
+      selectIcon(icon);
+      el.setPointerCapture(e.pointerId);
+      press = { sx: e.clientX, sy: e.clientY, x0: icon.x, y0: icon.y, moved: false };
+    });
+    el.addEventListener("pointermove", (e) => {
+      if (!press) return;
+      const dx = e.clientX - press.sx, dy = e.clientY - press.sy;
+      if (!press.moved && Math.hypot(dx, dy) < 4) return;
+      press.moved = true;
+      icon.x = press.x0 + dx;
+      icon.y = press.y0 + dy;
+      el.style.left = icon.x + "px";
+      el.style.top = icon.y + "px";
+    });
+    el.addEventListener("pointerup", (e) => {
+      if (!press) return;
+      const { moved, x0, y0 } = press;
+      press = null;
+      if (moved) {
+        if (icon === trashIcon() || !overTrash(e.clientX, e.clientY)) return;
+        if (icon.keep) {
+          // It won't go. It's soft, not disposable.
+          icon.x = x0; icon.y = y0;
+          el.style.left = x0 + "px";
+          el.style.top = y0 + "px";
+          dialog("TRASH", ["SOFTBODIES SQUISHED BACK OUT.", "IT DOES NOT WANT TO GO."]);
+        } else {
+          el.hidden = true;
+          trashed.push(icon);
+          renderTrashIcon();
+        }
+        return;
+      }
+      const now = performance.now();
+      if (now - lastClick < 450) { lastClick = 0; icon.open(); }
+      else lastClick = now;
+    });
+  });
+  tidyIcons();
+}
+
+desk.addEventListener("pointerdown", (e) => { if (e.target === desk) { selectIcon(null); focusWin(null); } });
+
+/* ---- menu bar ---- */
+
+let openMenu = null;
+function closeMenus() {
+  if (!openMenu) return;
+  openMenu.menu.remove();
+  openMenu.title.classList.remove("open");
+  openMenu = null;
+}
+
+function addMenu(label, entries) {
+  const title = document.createElement("div");
+  title.className = "menu-title";
+  title.dataset.menu = label;
+  title.append(text(label));
+  const show = () => {
+    closeMenus();
+    const menu = document.createElement("div");
+    menu.className = "menu";
+    menu.style.left = title.offsetLeft + "px";
+    entries.forEach((entry) => {
+      if (!entry) {
+        const s = document.createElement("div");
+        s.className = "sep";
+        menu.append(s);
+        return;
+      }
+      const item = document.createElement("div");
+      item.className = "item";
+      item.dataset.item = entry[0];
+      item.append(text(entry[0]));
+      item.addEventListener("click", () => { closeMenus(); entry[1](); });
+      menu.append(item);
+    });
+    bar.append(menu);
+    title.classList.add("open");
+    openMenu = { menu, title };
+  };
+  title.addEventListener("pointerdown", (e) => {
+    e.stopPropagation();
+    if (openMenu && openMenu.title === title) closeMenus(); else show();
+  });
+  title.addEventListener("pointerenter", () => { if (openMenu && openMenu.title !== title) show(); });
+  bar.append(title);
+}
+
+window.addEventListener("pointerdown", (e) => {
+  if (openMenu && !e.target.closest(".menu") && !e.target.closest(".menu-title")) closeMenus();
+}, true);
+
+function buildBar() {
+  addMenu("SOFTDESK", [
+    ["ABOUT THIS DESK", () => dialog("ABOUT", ["SOFTDESK 1.0", "", "ONE FILE. BLACK AND WHITE.", "SOFTPUTE, SOFTPHYS AND SOFTWIN."])],
+    ["TIDY ICONS", tidyIcons],
+    ["WALLPAPER", openWallpaper],
+    null,
+    ["SHUT DOWN", shutDown],
+  ]);
+  addMenu("OPEN", [
+    ["TOYS", () => launch(TOY.SELECTOR)],
+    ["SOFTPHYS", () => launch(TOY.SOFTPHYS)],
+    ["SOFTBODIES", () => launch(TOY.SOFTBODIES)],
+    ["SCENES", openScenes],
+    null,
+    ["READ ME", openReadMe],
+    ["KEYS", openKeys],
+    ["CLOCK", openClock],
+    ["TRASH", openTrash],
+  ]);
+  const clock = document.createElement("div");
+  clock.id = "clock";
+  bar.append(clock);
+  const update = () => {
+    const d = new Date(), p = (n) => String(n).padStart(2, "0");
+    clock.replaceChildren(text(`${p(d.getHours())}:${p(d.getMinutes())}`));
+  };
+  update();
+  setInterval(update, 5000);
+}
+
+/* ---- power ---- */
+
+function shutDown() {
+  [...windows].forEach(closeWin);
+  screenEl.replaceChildren();
+  screenEl.className = "center";
+  screenEl.hidden = false;
+  screenEl.append(text("IT IS NOW SAFE TO LET GO OF THE JELLY."));
+  const hint = document.createElement("div");
+  hint.style.marginTop = "16px";
+  hint.append(text("CLICK TO START AGAIN"));
+  screenEl.append(hint);
+  screenEl.addEventListener("click", boot, { once: true });
+}
+
+async function boot() {
+  screenEl.replaceChildren();
+  screenEl.className = "";
+  screenEl.hidden = false;
+  for (const row of ["SOFTDESK 1.0", "", "SOFTPUTE BODIES ..... OK", "SOFTPHYS POWDER ..... OK", "SOFTWIN WINDOWS ..... OK", "JELLY ............... OK"]) {
+    lines(screenEl, [row]);
+    await new Promise((r) => setTimeout(r, 170));
+  }
+  screenEl.hidden = true;
+  await launch(TOY.SELECTOR);
+}
+
+/* ---- start ---- */
+
+window.addEventListener("resize", () => {
+  tidyIcons();
+  windows.forEach(place);
+  // Moving to a display with another scale changes every pixel.
+  windows.filter((w) => w.kind === "softbodies").forEach(appSize);
+});
+
+async function start() {
+  const raw = atob(WASM_BASE64), bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  module = await WebAssembly.compile(bytes);
+
+  // The font lives in the program, so a throwaway copy lends it to the desktop.
+  const fontApp = { wasm: null };
+  const stubEnv = new Proxy({}, { get: () => () => 0 });
+  const inst = await WebAssembly.instantiate(module, { env: stubEnv, wasi_snapshot_preview1: wasiStubs(fontApp) });
+  fontApp.wasm = inst.exports;
+  inst.exports._initialize();
+  FONT = {};
+  for (let ch = 32; ch < 96; ch++) {
+    const ptr = inst.exports.sb_glyph(ch);
+    if (ptr) FONT[ch] = [...new Uint8Array(inst.exports.memory.buffer, ptr, 7)];
+  }
+
+  setWallpaper(wallpaper);
+  buildBar();
+  buildIcons();
+  requestAnimationFrame(tick);
+  await boot();
+}
+
+// A small window on the desktop's state, for tests/web_drive.py.
+window.softdesk = {
+  state: () => JSON.stringify({
+    active: active && active.key ? active.key : active ? "softbodies" : null,
+    crashes,
+    wallpaper,
+    tabs: tray.children.length,
+    screen: !screenEl.hidden,
+    windows: windows.map((w) => ({ key: w.key || "softbodies", kind: w.kind, x: w.x, y: w.y, w: w.w,
+      h: w.kind === "softbodies" ? w.h : w.el.offsetHeight, minimized: w.minimized })),
+    icons: ICONS.filter((i) => !i.gone).map((i) => ({ id: i.id, x: i.x, y: i.y, hidden: i.el.hidden })),
+    trashed: trashed.length,
+  }),
+  // Counts a world's pixels by colour, straight from its canvas.
+  pixels(index) {
+    const app = windows.filter((w) => w.kind === "softbodies")[index];
+    const { width: w, height: h } = app.canvas;
+    const d = app.ctx.getImageData(0, 0, w, h).data;
+    let white = 0, black = 0, other = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i] === 255 && d[i + 1] === 255 && d[i + 2] === 255) white++;
+      else if (d[i] === 0 && d[i + 1] === 0 && d[i + 2] === 0) black++;
+      else other++;
+    }
+    return JSON.stringify({ w, h, white, black, other });
+  },
+  stat: (index, which) => windows.filter((w) => w.kind === "softbodies")[index].wasm.sb_stat(which),
+  toyMode: (index) => windows.filter((w) => w.kind === "softbodies")[index].wasm.sb_mode(),
+  isWhite(index, x, y) {
+    const app = windows.filter((w) => w.kind === "softbodies")[index];
+    return app.ctx.getImageData(x, y, 1, 1).data[0] === 255;
+  },
+};
+
+start().catch((e) => {
+  console.error(e);
+  screenEl.hidden = false;
+  screenEl.style.color = "#fff";
+  screenEl.style.fontFamily = "monospace";
+  screenEl.textContent = "SoftDesk could not start: " + e.message;
+});
+</script>
+</body>
+</html>
